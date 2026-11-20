@@ -2,6 +2,8 @@
 
 把平时转发给自己的好文章，变成下一期公众号的选题库。在 CONTENTxNOW 里，你可以沿着一篇参考文章开稿，给自己的读者选正文、挑标题、配图，再把排好版的成稿送到要发布的公众号。
 
+[独立部署](#独立部署) · [公众号工作流](#从微信收藏到公众号发布) · [界面截图](#工作台截图) · [微信交流群](#微信交流群)
+
 ## CONTENTxNOW 在线版即将开放
 
 CONTENTxNOW 正在准备面向大家开放的 SaaS 在线版。届时打开浏览器就能使用内容工作台。想提前体验，可以先[扫码加入微信交流群，预约体验资格](#微信交流群)。
@@ -41,6 +43,72 @@ CONTENTxNOW 正在准备面向大家开放的 SaaS 在线版。届时打开浏�
 **生成审阅**集中展示推荐标题和备选标题，编辑可以复制或采用选中的版本。
 
 ![标题审阅页中的生成记录、推荐标题和采用按钮](assets/editorial-review.png)
+
+## 独立部署
+
+GitHub 公开产品文档和版本说明。企业内部自用可通过[微信交流群](#微信交流群)咨询部署授权，取得与版本及机器架构匹配的 **工作台和链接采集镜像、Compose 配置、环境变量模板、工作流目录及权重清单** 后，按以下步骤安装。GitHub Release 自动生成的 Source code 压缩包只含本展示仓的文件。
+
+### 1. 准备运行环境
+
+- **Docker**。使用 Docker Desktop，或 Linux 上的 Docker Engine，配套 Docker Compose **2.30.0 或更高版本**。以下命令适用于 macOS 或 Linux 的终端，另需 OpenSSL 和 curl。可运行 `docker compose version` 查看版本。[Docker Compose 安装说明](https://docs.docker.com/compose/install/)
+- **PostgreSQL**。复用现有实例，准备独立业务库 `Workflow` 和可在其中建表的数据库用户。若需新建，假设已有业务用户 `studio_user`，数据库管理员可执行 `CREATE DATABASE "Workflow" OWNER studio_user;`。工作台容器需要能连接该实例。
+- **配音权重**。默认部署包含本地配音，启动时会校验 `Fun-CosyVoice3-0.5B-2512` 的 14 个文件，合计约 5.05 GiB。可复用已有权重，或按随交付提供的 `scripts/model-manifest.json` 从各文件对应的 ModelScope 地址下载，保留清单中的相对路径。记下包含 `cosyvoice3.yaml` 的目录的绝对路径。[ModelScope 模型页](https://modelscope.cn/models/FunAudioLLM/Fun-CosyVoice3-0.5B-2512)
+
+### 2. 导入镜像并初始化配置
+
+在部署文件中找到同时包含 `compose.yaml`、`docker/` 和 `platform-workflows/` 的目录，进入该目录后执行后续命令。若以归档形式取得镜像，对每个镜像归档执行一次以下命令，将路径换成实际文件路径。
+
+```sh
+docker image load --input /path/to/image.tar
+```
+
+首次安装时，以下命令会从模板创建配置，分别生成工作台服务密钥和链接采集密钥。重复执行会保留已有文件。
+
+```sh
+(
+  set -euC
+  umask 077
+  mkdir -p runtime/link-archives
+  if [ ! -e runtime/docker.env ]; then
+    token=$(openssl rand -hex 32)
+    sed "s/^STUDIO_SERVICE_TOKEN=$/STUDIO_SERVICE_TOKEN=$token/" docker/docker.env.example > runtime/docker.env
+  fi
+  test -e runtime/docker.paths.env || cp docker/docker.paths.env.example runtime/docker.paths.env
+  test -e runtime/link-capture.secret || openssl rand -hex 32 > runtime/link-capture.secret
+)
+```
+
+### 3. 配置数据库和模型
+
+编辑下列文件中的对应项。示例中的用户名、密码和路径需换成实际值。
+
+| 配置文件 | 配置项 | 填写示例 |
+| --- | --- | --- |
+| `runtime/docker.env` | `DATABASE_URL` | `postgresql://studio_user:YOUR_PASSWORD@host.docker.internal:5432/Workflow`。此地址适用于数据库端口已开放给容器的宿主机。独立数据库服务器请填写其内网地址，密码中的特殊字符需按 URL 规则编码。 |
+| `runtime/docker.paths.env` | `CONTENT_STUDIO_MODEL_DIR` | `/absolute/path/to/Fun-CosyVoice3-0.5B-2512`，工作台会以只读方式挂载该目录。 |
+| `runtime/docker.paths.env` 和 `runtime/docker.env` | `STUDIO_PORT` 和 `STUDIO_PUBLIC_URL` | 默认分别为 `80` 和 `http://localhost`。若 80 已占用，可分别改为 `8080` 和 `http://localhost:8080`。 |
+
+如果使用企业自己的写作模型，在 `runtime/docker.env` 中设置以下两项。示例指向宿主机上的 Ollama，把模型名换成该服务 `GET /v1/models` 返回的实际 ID。需要鉴权时，在同一文件另设 `STUDIO_LOCAL_MODEL_API_KEY`。
+
+```dotenv
+STUDIO_LOCAL_MODEL_BASE=http://host.docker.internal:11434/v1
+STUDIO_LOCAL_MODEL=qwen3:8b
+```
+
+### 4. 启动并首次登录
+
+```sh
+docker compose --env-file runtime/docker.paths.env config --quiet
+docker compose --env-file runtime/docker.paths.env up -d --no-build --pull never --wait
+docker compose --env-file runtime/docker.paths.env ps
+curl --fail --show-error http://localhost/health
+```
+
+当 `studio` 和 `link-capture` 均显示 `healthy`，且健康接口返回 `"ok":true`，在部署机器上打开 [http://localhost](http://localhost)，首次进入时创建管理员账号，密码至少 12 位。若改用了 8080，访问地址和健康检查地址都要加上 `:8080`。接入本地写作模型后，可导入一篇参考文章，点「发起母稿生成」检查模型是否可选。
+
+### 日常维护
+
+启动失败时，可运行 `docker compose --env-file runtime/docker.paths.env logs --tail 100 studio link-capture` 查看日志。若提示缺少镜像，用 `docker compose --env-file runtime/docker.paths.env config --images` 核对已导入的镜像名称和标签。备份或迁移时，请一并保存 PostgreSQL 的 `Workflow` 库、`runtime/`、`platform-workflows/` 和配音权重。保留原 `STUDIO_SERVICE_TOKEN`，以便还原已加密的凭据。
 
 ## 企业本地模型
 
